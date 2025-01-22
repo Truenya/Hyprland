@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <re2/re2.h>
 
 #include "Compositor.hpp"
@@ -13,7 +14,6 @@
 #include "managers/VersionKeeperManager.hpp"
 #include "managers/DonationNagManager.hpp"
 #include "managers/eventLoop/EventLoopManager.hpp"
-#include <algorithm>
 #include <aquamarine/output/Output.hpp>
 #include <bit>
 #include <ctime>
@@ -21,13 +21,13 @@
 #include <print>
 #include <cstring>
 #include <filesystem>
-#include <ranges>
 #include <unordered_set>
 #include "debug/HyprCtl.hpp"
 #include "debug/CrashReporter.hpp"
 #ifdef USES_SYSTEMD
 #include <helpers/SdDaemon.hpp> // for SdNotify
 #endif
+#include <ranges>
 #include "helpers/varlist/VarList.hpp"
 #include "helpers/fs/FsUtils.hpp"
 #include "protocols/FractionalScale.hpp"
@@ -44,7 +44,6 @@
 #include "xwayland/XWayland.hpp"
 #include "helpers/ByteOperations.hpp"
 #include "render/decorations/CHyprGroupBarDecoration.hpp"
-
 #include "managers/KeybindManager.hpp"
 #include "managers/SessionLockManager.hpp"
 #include "managers/XWaylandManager.hpp"
@@ -1052,7 +1051,7 @@ PHLMONITOR CCompositor::getRealMonitorFromOutput(SP<Aquamarine::IOutput> out) {
     return nullptr;
 }
 
-void CCompositor::focusWindow(PHLWINDOW pWindow, SP<CWLSurfaceResource> pSurface) {
+void CCompositor::focusWindow(PHLWINDOW pWindow, SP<CWLSurfaceResource> pSurface, bool preserveFocusHistory) {
 
     static auto PFOLLOWMOUSE        = CConfigValue<Hyprlang::INT>("input:follow_mouse");
     static auto PSPECIALFALLTHROUGH = CConfigValue<Hyprlang::INT>("input:special_fallthrough");
@@ -1171,12 +1170,14 @@ void CCompositor::focusWindow(PHLWINDOW pWindow, SP<CWLSurfaceResource> pSurface
 
     g_pInputManager->recheckIdleInhibitorStatus();
 
-    // move to front of the window history
-    const auto HISTORYPIVOT = std::find_if(m_vWindowFocusHistory.begin(), m_vWindowFocusHistory.end(), [&](const auto& other) { return other.lock() == pWindow; });
-    if (HISTORYPIVOT == m_vWindowFocusHistory.end()) {
-        Debug::log(ERR, "BUG THIS: {} has no pivot in history", pWindow);
-    } else {
-        std::rotate(m_vWindowFocusHistory.begin(), HISTORYPIVOT, HISTORYPIVOT + 1);
+    if (!preserveFocusHistory) {
+        // move to front of the window history
+        const auto HISTORYPIVOT = std::ranges::find_if(m_vWindowFocusHistory, [&](const auto& other) { return other.lock() == pWindow; });
+        if (HISTORYPIVOT == m_vWindowFocusHistory.end()) {
+            Debug::log(ERR, "BUG THIS: {} has no pivot in history", pWindow);
+        } else {
+            std::rotate(m_vWindowFocusHistory.begin(), HISTORYPIVOT, HISTORYPIVOT + 1);
+        }
     }
 
     if (*PFOLLOWMOUSE == 0)
@@ -1640,37 +1641,52 @@ PHLWINDOW CCompositor::getWindowInDirection(const CBox& box, PHLWORKSPACE pWorks
     return nullptr;
 }
 
-PHLWINDOW CCompositor::getNextWindowOnWorkspace(PHLWINDOW pWindow, bool focusableOnly, std::optional<bool> floating, bool visible) {
-    auto       it       = std::ranges::find(m_vWindows, pWindow);
-    const auto FINDER   = [&](const PHLWINDOW& w) { return isWindowAvailableForCycle(pWindow, w, focusableOnly, floating, visible); };
-    const auto IN_RIGHT = std::find_if(it, m_vWindows.end(), FINDER);
-    if (IN_RIGHT != m_vWindows.end())
-        return *IN_RIGHT;
-    const auto IN_LEFT = std::find_if(m_vWindows.begin(), it, FINDER);
-    return *IN_LEFT;
-}
-
-PHLWINDOW CCompositor::getPrevWindowOnWorkspace(PHLWINDOW pWindow, bool focusableOnly, std::optional<bool> floating, bool visible) {
-    auto       it      = std::ranges::find(std::ranges::reverse_view(m_vWindows), pWindow);
-    const auto FINDER  = [&](const PHLWINDOW& w) { return isWindowAvailableForCycle(pWindow, w, focusableOnly, floating, visible); };
-    const auto IN_LEFT = std::find_if(it, m_vWindows.rend(), FINDER);
-    if (IN_LEFT != m_vWindows.rend())
-        return *IN_LEFT;
-    const auto IN_RIGHT = std::find_if(m_vWindows.rbegin(), it, FINDER);
-    return *IN_RIGHT;
-}
-
-inline static bool isWorkspaceMatches(PHLWINDOW pWindow, const PHLWINDOW w, bool anyWorkspace) {
+template <typename WINDOWPTR>
+static bool isWorkspaceMatches(WINDOWPTR pWindow, const WINDOWPTR w, bool anyWorkspace) {
     return anyWorkspace ? w->m_pWorkspace && w->m_pWorkspace->isVisible() : w->m_pWorkspace == pWindow->m_pWorkspace;
 }
 
-inline static bool isFloatingMatches(PHLWINDOW w, std::optional<bool> floating) {
+template <typename WINDOWPTR>
+static bool isFloatingMatches(WINDOWPTR w, std::optional<bool> floating) {
     return !floating.has_value() || w->m_bIsFloating == floating.value();
-};
+}
 
-bool CCompositor::isWindowAvailableForCycle(PHLWINDOW pWindow, const PHLWINDOW w, bool focusableOnly, std::optional<bool> floating, bool anyWorkspace) {
-    return isFloatingMatches(w, floating) && w != pWindow && isWorkspaceMatches(pWindow, w, anyWorkspace) && w->m_bIsMapped && !w->isHidden() &&
-        (!focusableOnly || !w->m_sWindowData.noFocus.valueOrDefault());
+template <typename WINDOWPTR>
+static bool isWindowAvailableForCycle(WINDOWPTR pWindow, WINDOWPTR w, bool focusableOnly, std::optional<bool> floating, bool anyWorkspace = false) {
+    return isFloatingMatches(w, floating) &&
+        (w != pWindow && isWorkspaceMatches(pWindow, w, anyWorkspace) && w->m_bIsMapped && !w->isHidden() && (!focusableOnly || !w->m_sWindowData.noFocus.valueOrDefault()));
+}
+
+template <typename Iterator>
+static PHLWINDOW getWindowPred(Iterator cur, Iterator end, Iterator begin, const std::function<bool(const PHLWINDOW&)> PRED) {
+    const auto IN_ONE_SIDE = std::find_if(cur, end, PRED);
+    if (IN_ONE_SIDE != end)
+        return *IN_ONE_SIDE;
+    const auto IN_OTHER_SIDE = std::find_if(begin, cur, PRED);
+    return *IN_OTHER_SIDE;
+}
+
+template <typename Iterator>
+static PHLWINDOW getWeakWindowPred(Iterator cur, Iterator end, Iterator begin, const std::function<bool(const PHLWINDOWREF&)> PRED) {
+    const auto IN_ONE_SIDE = std::find_if(cur, end, PRED);
+    if (IN_ONE_SIDE != end)
+        return IN_ONE_SIDE->lock();
+    const auto IN_OTHER_SIDE = std::find_if(begin, cur, PRED);
+    return IN_OTHER_SIDE->lock();
+}
+
+PHLWINDOW CCompositor::getWindowCycleHist(PHLWINDOWREF cur, bool focusableOnly, std::optional<bool> floating, bool visible, bool next) {
+    const auto FINDER = [&](const PHLWINDOWREF& w) { return isWindowAvailableForCycle(cur, w, focusableOnly, floating, visible); };
+    // also m_vWindowFocusHistory has reverse order, so when it is next - we need to reverse again
+    return next ?
+        getWeakWindowPred(std::ranges::find(std::ranges::reverse_view(m_vWindowFocusHistory), cur), m_vWindowFocusHistory.rend(), m_vWindowFocusHistory.rbegin(), FINDER) :
+        getWeakWindowPred(std::ranges::find(m_vWindowFocusHistory, cur), m_vWindowFocusHistory.end(), m_vWindowFocusHistory.begin(), FINDER);
+}
+
+PHLWINDOW CCompositor::getWindowCycle(PHLWINDOW cur, bool focusableOnly, std::optional<bool> floating, bool visible, bool prev) {
+    const auto FINDER = [&](const PHLWINDOW& w) { return isWindowAvailableForCycle(cur, w, focusableOnly, floating, visible); };
+    return prev ? getWindowPred(std::ranges::find(std::ranges::reverse_view(m_vWindows), cur), m_vWindows.rend(), m_vWindows.rbegin(), FINDER) :
+                  getWindowPred(std::ranges::find(m_vWindows, cur), m_vWindows.end(), m_vWindows.begin(), FINDER);
 }
 
 WORKSPACEID CCompositor::getNextAvailableNamedWorkspace() {

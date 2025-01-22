@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <list>
 #include <sys/resource.h>
 
@@ -9,7 +10,6 @@
 #include "managers/SessionLockManager.hpp"
 #include "desktop/Window.hpp"
 #include "protocols/types/ColorManagement.hpp"
-#include "helpers/memory/Memory.hpp"
 
 #include <aquamarine/backend/Backend.hpp>
 #include <aquamarine/output/Output.hpp>
@@ -84,7 +84,7 @@ class CCompositor {
     PHLMONITOR             getMonitorFromCursor();
     PHLMONITOR             getMonitorFromVector(const Vector2D&);
     void                   removeWindowFromVectorSafe(PHLWINDOW);
-    void                   focusWindow(PHLWINDOW, SP<CWLSurfaceResource> pSurface = nullptr);
+    void                   focusWindow(PHLWINDOW, SP<CWLSurfaceResource> pSurface = nullptr, bool preserveFocusHistory = false);
     void                   focusSurface(SP<CWLSurfaceResource>, PHLWINDOW pWindowOwner = nullptr);
     bool                   monitorExists(PHLMONITOR);
     PHLWINDOW              vectorToWindowUnified(const Vector2D&, uint8_t properties, PHLWINDOW pIgnoreWindow = nullptr);
@@ -106,8 +106,8 @@ class CCompositor {
     void                   cleanupFadingOut(const MONITORID& monid);
     PHLWINDOW              getWindowInDirection(PHLWINDOW, char);
     PHLWINDOW              getWindowInDirection(const CBox& box, PHLWORKSPACE pWorkspace, char dir, PHLWINDOW ignoreWindow = nullptr, bool useVectorAngles = false);
-    PHLWINDOW              getNextWindowOnWorkspace(PHLWINDOW, bool focusableOnly = false, std::optional<bool> floating = {}, bool visible = false);
-    PHLWINDOW              getPrevWindowOnWorkspace(PHLWINDOW, bool focusableOnly = false, std::optional<bool> floating = {}, bool visible = false);
+    PHLWINDOW              getWindowCycle(PHLWINDOW cur, bool focusableOnly = false, std::optional<bool> floating = std::nullopt, bool visible = false, bool prev = false);
+    PHLWINDOW              getWindowCycleHist(PHLWINDOWREF cur, bool focusableOnly = false, std::optional<bool> floating = std::nullopt, bool visible = false, bool next = false);
     WORKSPACEID            getNextAvailableNamedWorkspace();
     bool                   isPointOnAnyMonitor(const Vector2D&);
     bool                   isPointOnReservedArea(const Vector2D& point, const PHLMONITOR monitor = nullptr);
@@ -163,11 +163,10 @@ class CCompositor {
     void             setRandomSplash();
     void             initManagers(eManagersInitStage stage);
     void             prepareFallbackOutput();
-    bool             isWindowAvailableForCycle(PHLWINDOW pWindow, PHLWINDOW w, bool focusableOnly, std::optional<bool> floating, bool anyWorkspace = false);
 
     uint64_t         m_iHyprlandPID    = 0;
     wl_event_source* m_critSigSource   = nullptr;
-    rlimit           m_sOriginalNofile = {0};
+    rlimit           m_sOriginalNofile = {.rlim_cur = 0};
 };
 
 inline UP<CCompositor> g_pCompositor;
